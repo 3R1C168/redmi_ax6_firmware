@@ -1,0 +1,6 @@
+dl/
+bin/
+build_dir/
+staging_dir/
+tmp/
+logs/
