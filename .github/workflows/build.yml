@@ -1,0 +1,175 @@
+name: Build Redmi AX6 Firmware
+
+on:
+  schedule:
+    # 每周四 UTC 20:00 = 北京时间周五 04:00
+    - cron: '0 20 * * 4'
+  workflow_dispatch:
+
+env:
+  REPO_URL: https://github.com/VIKINGYFY/immortalwrt
+  REPO_BRANCH: main
+  TZ: Asia/Shanghai
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 350
+
+    steps:
+      - name: 检出本仓库
+        uses: actions/checkout@v4
+
+      - name: 清理磁盘空间
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+                      /opt/hostedtoolcache/CodeQL /usr/local/share/boost \
+                      /usr/local/.ghcup /opt/hostedtoolcache/Java_Temurin-Hotspot_jdk
+          sudo docker image prune -a -f || true
+          df -h /
+
+      - name: 获取源码版本号
+        id: src
+        run: |
+          echo "sha=$(git ls-remote $REPO_URL refs/heads/$REPO_BRANCH | cut -c1-8)" >> $GITHUB_OUTPUT
+          echo "date=$(date +%Y%m%d)" >> $GITHUB_OUTPUT
+          echo "datefull=$(date +'%Y-%m-%d %H:%M')" >> $GITHUB_OUTPUT
+
+      - name: 克隆源码
+        run: |
+          git clone --depth=1 --single-branch -b $REPO_BRANCH $REPO_URL openwrt
+
+      - name: 恢复 dl 缓存
+        uses: actions/cache@v4
+        with:
+          path: openwrt/dl
+          key: dl-${{ steps.src.outputs.sha }}
+          restore-keys: dl-
+
+      - name: 恢复 ccache
+        uses: actions/cache@v4
+        with:
+          path: /home/runner/.ccache
+          key: ccache-${{ steps.src.outputs.sha }}
+          restore-keys: ccache-
+
+      - name: 恢复工具链暂存区
+        uses: actions/cache@v4
+        with:
+          path: openwrt/staging_dir
+          key: staging-${{ steps.src.outputs.sha }}
+          restore-keys: staging-
+
+      - name: 安装编译依赖
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential clang flex bison g++ gawk \
+            gcc-multilib g++-multilib gettext git libncurses5-dev libssl-dev \
+            python3-setuptools rsync swig unzip zlib1g-dev file wget time \
+            python3-pyelftools libelf-dev ccache
+
+      - name: 应用配置
+        run: |
+          cd openwrt
+          cat ../feeds.conf >> feeds.conf.default
+          cp ../.config .config
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
+          make defconfig
+
+      - name: 执行自定义脚本
+        run: |
+          cd openwrt
+          bash ../scripts/diy.sh || true
+
+      - name: 下载软件包源码
+        run: |
+          cd openwrt
+          make download -j8 || make download -j1 V=s
+
+      - name: 编译固件
+        run: |
+          cd openwrt
+          make -j$(nproc) || make -j1 V=s
+
+      - name: 保存 ccache
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: /home/runner/.ccache
+          key: ccache-${{ steps.src.outputs.sha }}
+
+      - name: 保存工具链暂存区
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: openwrt/staging_dir
+          key: staging-${{ steps.src.outputs.sha }}
+
+      - name: 整理产物
+        run: |
+          cd openwrt
+          OUT=bin/targets/qualcommax/ipq807x
+          ls -lh $OUT/
+          mkdir -p ../firmware
+          find $OUT -maxdepth 1 -name '*redmi_ax6*' \
+            \( -name '*.bin' -o -name '*.ubi' -o -name '*.itb' \) \
+            -exec cp {} ../firmware/ \;
+          cp $OUT/sha256sums ../firmware/ 2>/dev/null || true
+          cd ../firmware
+          sha256sum * > SHA256SUMS.txt 2>/dev/null || true
+          ls -lh .
+          ls > ../filelist.txt
+
+      - name: 生成 Release 说明
+        run: |
+          cat > release_body.txt << 'EOF'
+          ## 红米 AX6 固件（ImmortalWrt + NSS）
+
+          | 项目 | 值 |
+          |------|-----|
+          | 源码 | VIKINGYFY/immortalwrt @ `${{ env.REPO_BRANCH }}` |
+          | 提交 | `${{ steps.src.outputs.sha }}` |
+          | 内核 | 6.18 |
+          | 构建时间 | ${{ steps.src.outputs.datefull }} |
+          | 触发方式 | ${{ github.event_name }} |
+
+          ### 预装内容
+          - NSS 硬件加速驱动（kernel 内置）
+          - 中文界面 + 中国时区/NTP/国内镜像源（default-settings-chn）
+          - Argon 主题
+          - nikki（mihomo 内核）透明代理
+
+          ### 文件说明
+          - `*-initramfs-factory.ubi` — 刷机中转固件
+          - `*-squashfs-sysupgrade.bin` — 最终固件
+          - `SHA256SUMS.txt` — 校验码
+
+          ### 刷机
+          参见仓库内《红米AX6-ImmortalWrt-操作指南.md》
+
+          ### 注意
+          刷好后建议关闭无线 offload（详见指南）。
+          EOF
+          echo "body written"
+
+      - name: 发布 Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.src.outputs.date }}
+          name: "AX6 固件 ${{ steps.src.outputs.date }}"
+          body_path: release_body.txt
+          files: firmware/*
+
+      - name: 清理旧 Release（只留最近 5 个）
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # 按发布时间倒序列出全部 release，跳过前 5 个，删除其余
+          gh release list --limit 100 --json tagName,publishedAt \
+            --jq 'sort_by(.publishedAt) | reverse | .[5:] | .[].tagName' \
+          | while read -r tag; do
+              [ -z "$tag" ] && continue
+              echo "删除旧版本: $tag"
+              gh release delete "$tag" --yes --cleanup-tag || true
+            done
