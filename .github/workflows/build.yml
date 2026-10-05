@@ -11,6 +11,10 @@ env:
   REPO_BRANCH: main
   TZ: Asia/Shanghai
 
+# 默认令牌是只读的，必须显式提权，否则创建 Release 会返回 403
+permissions:
+  contents: write
+
 jobs:
   build:
     runs-on: ubuntu-24.04
@@ -40,21 +44,21 @@ jobs:
           git clone --depth=1 --single-branch -b $REPO_BRANCH $REPO_URL openwrt
 
       - name: 恢复 dl 缓存
-        uses: actions/cache@v4
+        uses: actions/cache/restore@v4
         with:
           path: openwrt/dl
           key: dl-${{ steps.src.outputs.sha }}
           restore-keys: dl-
 
       - name: 恢复 ccache
-        uses: actions/cache@v4
+        uses: actions/cache/restore@v4
         with:
           path: /home/runner/.ccache
           key: ccache-${{ steps.src.outputs.sha }}
           restore-keys: ccache-
 
       - name: 恢复工具链暂存区
-        uses: actions/cache@v4
+        uses: actions/cache/restore@v4
         with:
           path: openwrt/staging_dir
           key: staging-${{ steps.src.outputs.sha }}
@@ -92,8 +96,17 @@ jobs:
           cd openwrt
           make -j$(nproc) || make -j1 V=s
 
+      - name: 保存 dl 缓存
+        if: always()
+        continue-on-error: true
+        uses: actions/cache/save@v4
+        with:
+          path: openwrt/dl
+          key: dl-${{ steps.src.outputs.sha }}
+
       - name: 保存 ccache
         if: always()
+        continue-on-error: true
         uses: actions/cache/save@v4
         with:
           path: /home/runner/.ccache
@@ -101,6 +114,7 @@ jobs:
 
       - name: 保存工具链暂存区
         if: always()
+        continue-on-error: true
         uses: actions/cache/save@v4
         with:
           path: openwrt/staging_dir
@@ -120,6 +134,12 @@ jobs:
           sha256sum * > SHA256SUMS.txt 2>/dev/null || true
           ls -lh .
           ls > ../filelist.txt
+          # 守卫：必须产出 sysupgrade 固件，否则明确报错而非静默产出空 Release
+          if ! ls *sysupgrade.bin >/dev/null 2>&1; then
+            echo "::error::未找到 sysupgrade 固件，编译可能因缓存不一致而跳过了打包"
+            exit 1
+          fi
+          echo "产物校验通过"
 
       - name: 生成 Release 说明
         run: |
@@ -152,6 +172,15 @@ jobs:
           刷好后建议关闭无线 offload（详见指南）。
           EOF
           echo "body written"
+
+      - name: 备份产物为 Artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: firmware-${{ steps.src.outputs.date }}
+          path: firmware/
+          retention-days: 14
+          if-no-files-found: warn
 
       - name: 发布 Release
         uses: softprops/action-gh-release@v2
