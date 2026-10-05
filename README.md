@@ -22,9 +22,13 @@
 
 | 文件 | 用途 |
 |------|------|
-| `*-initramfs-factory.ubi` | 刷机中转固件（第一次刷机用）|
-| `*-squashfs-sysupgrade.bin` | 最终固件 |
+| `*-redmi_ax6-stock-squashfs-factory.ubi` | **刷过 U-Boot 的机器**第一次刷用这个 |
+| `*-redmi_ax6-stock-squashfs-sysupgrade.bin` | **刷过 U-Boot 的机器**后续升级用这个 |
+| `*-redmi_ax6-initramfs-factory.ubi` | 原厂机器刷机中转固件 |
+| `*-redmi_ax6-squashfs-sysupgrade.bin` | 原厂机器的最终固件 |
 | `SHA256SUMS.txt` | 校验码，可用来确认文件没损坏 |
+
+**先看上一节「两个变体，选错会刷不进去」确定你该用哪个。**
 
 只保留最近 5 个版本，更旧的会自动删除。
 
@@ -47,6 +51,47 @@
 - **中文**：界面汉化、中国时区、国内 NTP、国内软件源镜像
 - **主题**：Argon
 - **代理**：nikki（mihomo 内核）
+
+## ⚠️ 两个变体，选错会刷不进去
+
+Release 里同时提供**两个变体**的固件，文件名只差 `-stock`：
+
+| 变体 | 适用于 | 文件名特征 |
+|------|--------|-----------|
+| `redmi_ax6` | **没刷过**第三方 U-Boot 的机器（原厂分区表）| 含 `redmi_ax6-squashfs-` |
+| **`redmi_ax6-stock`** | **刷过**第三方 U-Boot / 做过分区扩容的机器 | 含 `redmi_ax6-stock-squashfs-` |
+
+**判据：你这台机器刷过 U-Boot 或做过分区扩容吗？**
+- 刷过 → **用 `-stock` 版**
+- 没刷过 → 用普通版
+
+### 为什么会有这个区别
+
+两者的分区表来源完全不同：
+
+- **普通版**：分区表是**写死在固件里的**（固定偏移 `0x2dc0000`）。也就是说，它会**无视**你 U-Boot 里的分区表。
+- **`-stock` 版**：从**引导程序里读取**分区表（技术名词 `qcom,smem-part`）。你扩容后的分区信息存在 U-Boot 里，所以它能**自动适配**你的扩容布局。
+
+ImmortalWrt 官方的原话（提交 `753e8267`）：
+
+> "有些设备使用了第三方非原厂 uboot 和 mibib，OpenWrt 的扩展布局在这些分区上**无法刷入、也无法正常启动**。"
+
+而保留 `-stock` 变体的理由（提交 `102fcffa`）：
+
+> "OpenWrt 的布局会**浪费约 30 MiB 空间**，这太多了。"
+
+**选错的后果**：刷了普通版会**引导失败（起不来）或覆盖你的扩容分区**。好消息是——**不会永久变砖**，你的第三方 U-Boot 还在，进 U-Boot 的网页恢复界面重刷 `-stock` 版即可。
+
+### `-stock` 版的刷法（与普通版不同）
+
+`-stock` 版**没有 initramfs 中转固件**，刷法也不一样：
+
+1. 进 **U-Boot 的网页恢复界面**（开机时按住 Reset 约 5 秒；电脑设静态 IP `192.168.1.10`，访问 `192.168.1.1`）
+2. 上传 `*-redmi_ax6-stock-squashfs-factory.ubi`
+3. 等它写入重启
+4. 起来之后，以后升级用 `*-redmi_ax6-stock-squashfs-sysupgrade.bin`
+
+> 普通版走的是"SSH 双分区切换"那套流程，**两者不可混用**。
 
 ## 刷机
 
